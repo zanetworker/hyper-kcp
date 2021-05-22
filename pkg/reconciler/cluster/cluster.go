@@ -47,6 +47,7 @@ func (c *Controller) reconcile(ctx context.Context, cluster *v1alpha1.Cluster) e
 			fmt.Sprintf("Invalid kubeconfig: %v", err))
 		return nil // Don't retry.
 	}
+
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		log.Printf("error creating client: %v", err)
@@ -99,8 +100,7 @@ func (c *Controller) reconcile(ctx context.Context, cluster *v1alpha1.Cluster) e
 		}
 	}
 
-	if !cluster.Status.Conditions.HasReady() ||
-	(c.syncerMode == SyncerModePush && c.syncers[cluster.Name] == nil) {
+	if cluster.Status.Conditions.HasReady() || (c.syncerMode == SyncerModePush && c.syncers[cluster.Name] == nil) {
 		kubeConfig := c.kubeconfig.DeepCopy()
 		if _, exists := kubeConfig.Contexts[logicalCluster]; !exists {
 			log.Printf("error installing syncer: no context with the name of the expected cluster: %s", logicalCluster)

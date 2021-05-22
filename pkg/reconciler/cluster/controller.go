@@ -145,7 +145,7 @@ func (c *Controller) handleErr(err error, key string) {
 	// Give up and report error elsewhere.
 	c.queue.Forget(key)
 	runtime.HandleError(err)
-	log.Printf("Dropping key %q after failed retries: %v", key, err)
+	klog.V(2).Infof("Dropping key %q after failed retries: %v", key, err)
 }
 
 func (c *Controller) process(key string) error {

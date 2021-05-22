@@ -12,7 +12,7 @@ import (
 
 const (
 	resyncPeriod = time.Hour
-	numThreads   = 2
+	numThreads   = 1
 )
 
 var (
@@ -26,9 +26,12 @@ var (
 func main() {
 	flag.Parse()
 	syncedResourceTypes := flag.Args()
-	if len(syncedResourceTypes) == 0 {
-		syncedResourceTypes = []string{"pods", "deployments"}
-	}
+	klog.Infoln("Synced Resources: ", syncedResourceTypes)
+	//if len(syncedResourceTypes) == 0 {
+	syncedResourceTypes = []string{"pods", "deployments", "hostedclusters"}
+	klog.Infoln("-------------------------")
+	klog.Infoln(syncedResourceTypes)
+	//}
 
 	// Create a client to dynamically watch "from".
 
@@ -63,6 +66,9 @@ func main() {
 	if err != nil {
 		klog.Fatal(err)
 	}
+
+	klog.Infof("Host for downstream cluster: %s", toConfig.Host)
+	klog.Infof("Host for upstream cluster: %s", fromConfig.Host)
 
 	s, err := syncer.New(fromConfig, toConfig, syncedResourceTypes, *clusterID)
 	if err != nil {

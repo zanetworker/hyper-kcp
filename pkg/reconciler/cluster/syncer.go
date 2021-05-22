@@ -65,7 +65,7 @@ func installSyncer(ctx context.Context, client kubernetes.Interface, syncerImage
 		},
 		Rules: []rbacv1.PolicyRule{
 			{
-				Verbs:     []string{"create"},
+				Verbs:     []string{"create", "list"},
 				APIGroups: []string{""},
 				Resources: []string{"namespaces"},
 			},
@@ -73,6 +73,11 @@ func installSyncer(ctx context.Context, client kubernetes.Interface, syncerImage
 				Verbs:     []string{"create", "update", "get"},
 				Resources: resourcesWithStatus,
 				APIGroups: apiGroups,
+			},
+			{
+				Verbs:     []string{"create", "update", "get"},
+				Resources: []string{"hostedclusters"},
+				APIGroups: []string{"hypershift.openshift.io"},
 			},
 		},
 	}

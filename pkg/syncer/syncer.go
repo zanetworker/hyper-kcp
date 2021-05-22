@@ -2,10 +2,15 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/json"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,7 +28,12 @@ import (
 	"k8s.io/klog"
 )
 
-const resyncPeriod = 10 * time.Hour
+const (
+	resyncPeriod = 10 * time.Hour
+	owner        = "owner"
+)
+
+var budgetExceededError = errors.New("cluster scheduling Budget Exceeded")
 
 type Controller struct {
 	queue workqueue.RateLimitingInterface
@@ -32,28 +42,32 @@ type Controller struct {
 	fromDSIF dynamicinformer.DynamicSharedInformerFactory
 
 	// Downstream
-	toClient dynamic.Interface
+	toClient, fromClient dynamic.Interface
 
-	stopCh chan struct{}
+	clusterID string
+	stopCh    chan struct{}
 }
 
 // New returns a new syncer Controller syncing spec from "from" to "to".
 func New(from, to *rest.Config, syncedResourceTypes []string, clusterID string) (*Controller, error) {
-	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	stopCh := make(chan struct{})
+	var (
+		queue  = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+		stopCh = make(chan struct{})
+	)
 
+	klog.Infoln("Info: ", syncedResourceTypes, clusterID)
 	c := Controller{
 		// TODO: should we have separate upstream and downstream sync workqueues?
 		queue: queue,
 
-		toClient: dynamic.NewForConfigOrDie(to),
-
-		stopCh: stopCh,
+		toClient:   dynamic.NewForConfigOrDie(to),
+		fromClient: dynamic.NewForConfigOrDie(from),
+		stopCh:     stopCh,
+		clusterID:  clusterID,
 	}
 
-	fromClient := dynamic.NewForConfigOrDie(from)
-	fromDSIF := dynamicinformer.NewFilteredDynamicSharedInformerFactory(fromClient, resyncPeriod, metav1.NamespaceAll, func(o *metav1.ListOptions) {
-		o.LabelSelector = fmt.Sprintf("kcp.dev/cluster=%s", clusterID)
+	fromDSIF := dynamicinformer.NewFilteredDynamicSharedInformerFactory(c.fromClient, resyncPeriod, metav1.NamespaceAll, func(o *metav1.ListOptions) {
+		//o.LabelSelector = fmt.Sprintf("kcp.dev/cluster=%s", clusterID)
 	})
 
 	// Get all types the upstream API server knows about.
@@ -62,13 +76,19 @@ func New(from, to *rest.Config, syncedResourceTypes []string, clusterID string) 
 	if err != nil {
 		return nil, err
 	}
+
+	klog.Infoln("GVRs: ", gvrstrs)
 	for _, gvrstr := range gvrstrs {
 		gvr, _ := schema.ParseResourceArg(gvrstr)
+		klog.Infoln("gvr: ", gvr.String())
 
-		if _, err := fromDSIF.ForResource(*gvr).Lister().List(labels.Everything()); err != nil {
+		ret, err := fromDSIF.ForResource(*gvr).Lister().List(labels.Everything())
+		if err != nil {
 			klog.Infof("Failed to list all %q: %v", gvrstr, err)
 			continue
 		}
+
+		klog.Infoln("INFO: ", ret)
 
 		fromDSIF.ForResource(*gvr).Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc:    func(obj interface{}) { c.AddToQueue(*gvr, obj) },
@@ -161,6 +181,7 @@ func (c *Controller) Start(numThreads int) {
 
 // startWorker processes work items until stopCh is closed.
 func (c *Controller) startWorker() {
+	klog.Infoln("Starting")
 	for {
 		select {
 		case <-c.stopCh:
@@ -182,6 +203,7 @@ func (c *Controller) Stop() {
 func (c *Controller) Done() <-chan struct{} { return c.stopCh }
 
 func (c *Controller) processNextWorkItem() bool {
+	klog.Infoln("processNextWorkItem")
 	// Wait until there is a new item in the working queue
 	i, quit := c.queue.Get()
 	if quit {
@@ -252,7 +274,7 @@ func (c *Controller) process(gvr schema.GroupVersionResource, obj interface{}) e
 		return nil
 	}
 
-	unstrob, isUnstructured := obj.(*unstructured.Unstructured)
+	unstructuredObject, isUnstructured := obj.(*unstructured.Unstructured)
 	if !isUnstructured {
 		err := fmt.Errorf("Object to synchronize is expected to be Unstructured, but is %T", obj)
 		klog.Error(err)
@@ -264,11 +286,38 @@ func (c *Controller) process(gvr schema.GroupVersionResource, obj interface{}) e
 		return err
 	}
 
-	if err := c.upsert(ctx, gvr, namespace, unstrob); err != nil {
+	if err := c.upsert(ctx, gvr, namespace, unstructuredObject); err != nil {
 		return err
 	}
 
 	return err
+}
+
+type BudgetExceededError struct {
+}
+
+func (e *BudgetExceededError) Error() string {
+	return fmt.Sprintf("Available Cluster Budget Exceeded")
+}
+
+func (c *Controller) ensureClusterSchedulingBudget(ctx context.Context, budget int) error {
+	// check the number of clusters created on this management cluster
+	nsList, err := c.toClient.Resource(schema.GroupVersionResource{
+		Group:    "",
+		Version:  "v1",
+		Resource: "namespaces",
+	}).List(ctx, metav1.ListOptions{})
+
+	if err != nil {
+		return err
+	}
+
+	budgeSize := len(nsList.Items)
+	if budgeSize >= budget {
+		return budgetExceededError
+	}
+	klog.Infof("Size of namespace  list %d", budgeSize)
+	return nil
 }
 
 func (c *Controller) ensureNamespaceExists(namespace string) error {
@@ -290,9 +339,18 @@ func (c *Controller) ensureNamespaceExists(namespace string) error {
 	return nil
 }
 
-// getClient gets a dynamic client for the GVR, scoped to namespace if the namespace is not "".
-func (c *Controller) getClient(gvr schema.GroupVersionResource, namespace string) dynamic.ResourceInterface {
+// getToClient gets a dynamic client for the GVR, scoped to namespace if the namespace is not "".
+func (c *Controller) getToClient(gvr schema.GroupVersionResource, namespace string) dynamic.ResourceInterface {
 	nri := c.toClient.Resource(gvr)
+	if namespace != "" {
+		return nri.Namespace(namespace)
+	}
+	return nri
+}
+
+// getToClient gets a dynamic client for the GVR, scoped to namespace if the namespace is not "".
+func (c *Controller) getFromClient(gvr schema.GroupVersionResource, namespace string) dynamic.ResourceInterface {
+	nri := c.fromClient.Resource(gvr)
 	if namespace != "" {
 		return nri.Namespace(namespace)
 	}
@@ -303,35 +361,80 @@ func (c *Controller) delete(ctx context.Context, gvr schema.GroupVersionResource
 	// TODO: get UID of just-deleted object and pass it as a precondition on this delete.
 	// This would avoid races where an object is deleted and another object with the same name is created immediately after.
 
-	return c.getClient(gvr, namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	return c.getToClient(gvr, namespace).Delete(ctx, name, metav1.DeleteOptions{})
 }
 
 func (c *Controller) upsert(ctx context.Context, gvr schema.GroupVersionResource, namespace string, unstrob *unstructured.Unstructured) error {
-	client := c.getClient(gvr, namespace)
+
+	var (
+		toClient           = c.getToClient(gvr, namespace)
+		fromClient         = c.getFromClient(gvr, namespace)
+		unstrobAnnotations = unstrob.GetAnnotations()
+	)
+
+	// random wait to avoid race conditions with other cluster syncers
+	rand.Seed(time.Now().UnixNano())
+	n := rand.Intn(10) // n will be between 0 and 10
+	klog.Infof("Sleeping %d seconds...\n", n)
+	time.Sleep(time.Duration(n) * time.Second)
+	klog.Infoln("Done")
 
 	// Attempt to create the object; if the object already exists, update it.
 	unstrob.SetUID("")
 	unstrob.SetResourceVersion("")
-	if _, err := client.Create(ctx, unstrob, metav1.CreateOptions{}); err != nil {
-		if !k8serrors.IsAlreadyExists(err) {
-			klog.Error("Creating resource %s/%s: %v", namespace, unstrob.GetName(), err)
-			return err
-		}
 
-		existing, err := client.Get(ctx, unstrob.GetName(), metav1.GetOptions{})
+	if len(unstrob.GetAnnotations()) == 0 {
+		unstrobAnnotations = make(map[string]string)
+	}
+	ownerValue, hasOwnerAnnotation := unstrobAnnotations[owner]
+
+	// upsert only if we are the owner of the resource or if the resource does not have an owner yet
+	klog.Infoln("Owner values", hasOwnerAnnotation, ownerValue, c.clusterID)
+	if ownerValue == c.clusterID || !hasOwnerAnnotation {
+		klog.Infof("Updating ownership on %s", gvr)
+		// add owner
+		unstrobAnnotations[owner] = c.clusterID
+		unstrob.SetAnnotations(unstrobAnnotations)
+
+		data, err := json.Marshal(unstrob)
 		if err != nil {
-			klog.Errorf("Getting resource %s/%s: %v", namespace, unstrob.GetName(), err)
 			return err
 		}
-		klog.Infof("Object %s/%s already exists: update it", gvr.Resource, unstrob.GetName())
-
-		unstrob.SetResourceVersion(existing.GetResourceVersion())
-		if _, err := client.Update(ctx, unstrob, metav1.UpdateOptions{}); err != nil {
+		if _, err := fromClient.Patch(ctx, unstrob.GetName(), types.MergePatchType, data, metav1.PatchOptions{
+			FieldManager: fmt.Sprintf("syncer-%s", c.clusterID),
+		}); err != nil {
 			klog.Errorf("Updating resource %s/%s: %v", namespace, unstrob.GetName(), err)
 			return err
 		}
+
+		klog.Infof("Ownership updated on %s:%s", gvr, unstrob.GetName())
+		if c.ensureClusterSchedulingBudget(ctx, 8) == budgetExceededError {
+			return budgetExceededError
+		}
+		if _, err := toClient.Create(ctx, unstrob, metav1.CreateOptions{}); err != nil {
+			if !k8serrors.IsAlreadyExists(err) {
+				klog.Error("Creating resource %s/%s: %v", namespace, unstrob.GetName(), err)
+				return err
+			}
+
+			existing, err := toClient.Get(ctx, unstrob.GetName(), metav1.GetOptions{})
+			if err != nil {
+				klog.Errorf("Getting resource %s/%s: %v", namespace, unstrob.GetName(), err)
+				return err
+			}
+			klog.Infof("Object %s/%s already exists: update it", gvr.Resource, unstrob.GetName())
+
+			unstrob.SetResourceVersion(existing.GetResourceVersion())
+			if _, err := toClient.Update(ctx, unstrob, metav1.UpdateOptions{}); err != nil {
+				klog.Errorf("Updating resource %s/%s: %v", namespace, unstrob.GetName(), err)
+				return err
+			}
+		} else {
+			klog.Infof("Created object %s/%s", gvr.Resource, unstrob.GetName())
+		}
+
 	} else {
-		klog.Infof("Created object %s/%s", gvr.Resource, unstrob.GetName())
+		klog.Infoln("I don't own this resource")
 	}
 
 	return nil
