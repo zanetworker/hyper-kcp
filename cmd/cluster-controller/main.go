@@ -51,9 +51,10 @@ func main() {
 		syncerMode = cluster.SyncerModePush
 	}
 
-
+	// make it work with Mac, kind runs cluster inside Hyperkit VMs so networking is disjoint
+	// TODO: add to make file
 	for _, c := range kubeconfig.Clusters {
-		c.Server ="https://host.docker.internal:6443"
+		c.Server = "https://host.docker.internal:6443"
 	}
 	cluster.NewController(r, *syncerImage, kubeconfig, resourcesToSync, syncerMode).Start(numThreads)
 }

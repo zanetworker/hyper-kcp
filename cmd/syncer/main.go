@@ -28,13 +28,13 @@ func main() {
 	syncedResourceTypes := flag.Args()
 	klog.Infoln("Synced Resources: ", syncedResourceTypes)
 	//if len(syncedResourceTypes) == 0 {
-	syncedResourceTypes = []string{"pods", "deployments", "hostedclusters"}
-	klog.Infoln("-------------------------")
-	klog.Infoln(syncedResourceTypes)
+	//syncedResourceTypes = []string{"pods", "deployments", "hostedclusters"}
+	syncedResourceTypes = []string{"hostedclusters", "clusters"}
+	klog.Infoln("Syncing the following resources: ", syncedResourceTypes)
+	klog.Infof("Cluster %s Reporting for Duty", *clusterID)
 	//}
 
 	// Create a client to dynamically watch "from".
-
 	var fromOverrides clientcmd.ConfigOverrides
 	if *fromContext != "" {
 		fromOverrides.CurrentContext = *fromContext

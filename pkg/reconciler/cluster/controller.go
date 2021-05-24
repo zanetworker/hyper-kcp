@@ -163,7 +163,7 @@ func (c *Controller) process(key string) error {
 
 	ctx := context.TODO()
 
-	if err := c.reconcile(ctx, current); err != nil {
+	if err := c.reconcileSyncer(ctx, current); err != nil {
 		return err
 	}
 
@@ -175,7 +175,7 @@ func (c *Controller) process(key string) error {
 	}
 	log.Println("no update")
 
-	return nil
+	return c.reconcileHostedCluster(ctx)
 }
 
 func (c *Controller) deletedCluster(obj interface{}) {

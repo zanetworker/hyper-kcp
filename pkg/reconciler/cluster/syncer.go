@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -177,6 +179,16 @@ func installSyncer(ctx context.Context, client kubernetes.Interface, syncerImage
 						Name:  "syncer",
 						Image: syncerImage,
 						Args:  args,
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								"cpu":    resource.MustParse("250m"),
+								"memory": resource.MustParse("64Mi"),
+							},
+							Limits: corev1.ResourceList{
+								"cpu":    resource.MustParse("500m"),
+								"memory": resource.MustParse("128Mi"),
+							},
+						},
 						VolumeMounts: []corev1.VolumeMount{{
 							Name:      "kubeconfig",
 							MountPath: "/kcp",
