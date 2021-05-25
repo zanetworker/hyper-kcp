@@ -4,7 +4,12 @@ import (
 	"context"
 	"io/ioutil"
 	"log"
+	"strconv"
 	"time"
+
+	"k8s.io/client-go/dynamic"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/kcp-dev/kcp/pkg/apis/cluster/v1alpha1"
 	clusterclient "github.com/kcp-dev/kcp/pkg/client/clientset/versioned"
@@ -41,24 +46,28 @@ const (
 //
 // When new Clusters are found, the syncer will be run there using the given image.
 func NewController(cfg *rest.Config, syncerImage string, kubeconfig clientcmdapi.Config, resourcesToSync []string, syncerMode SyncerMode) *Controller {
-	client := clusterv1alpha1.NewForConfigOrDie(cfg)
-	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	stopCh := make(chan struct{}) // TODO: hook this up to SIGTERM/SIGINT
 
-	crdClient := apiextensionsv1client.NewForConfigOrDie(cfg)
+	var (
+		client = clusterv1alpha1.NewForConfigOrDie(cfg)
+		queue  = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+		stopCh = make(chan struct{}) // TODO: hook this up to SIGTERM/SIGINT
 
-	c := &Controller{
-		queue:           queue,
-		client:          client,
-		crdClient:       crdClient,
-		syncerImage:     syncerImage,
-		kubeconfig:      kubeconfig,
-		stopCh:          stopCh,
-		resourcesToSync: resourcesToSync,
-		syncerMode:      syncerMode,
-		syncers:         map[string]*syncer.Controller{},
-	}
+		dynamicClient = dynamic.NewForConfigOrDie(cfg)
+		crdClient     = apiextensionsv1client.NewForConfigOrDie(cfg)
+		c             = &Controller{
+			queue:           queue,
+			client:          client,
+			crdClient:       crdClient,
+			syncerImage:     syncerImage,
+			kubeconfig:      kubeconfig,
+			stopCh:          stopCh,
+			resourcesToSync: resourcesToSync,
+			syncerMode:      syncerMode,
+			syncers:         map[string]*syncer.Controller{},
+		}
+	)
 
+	c.dynamicClient = dynamicClient
 	sif := externalversions.NewSharedInformerFactoryWithOptions(clusterclient.NewForConfigOrDie(cfg), resyncPeriod)
 	sif.Cluster().V1alpha1().Clusters().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj interface{}) { c.enqueue(obj) },
@@ -69,12 +78,22 @@ func NewController(cfg *rest.Config, syncerImage string, kubeconfig clientcmdapi
 	sif.WaitForCacheSync(stopCh)
 	sif.Start(stopCh)
 
+	//gvrstr := "hostedclusters.v1alpha1.hypershift.openshift.io"
+	//gvr, _ := schema.ParseResourceArg(gvrstr)
+
+	//cockPitDSIF.ForResource(*gvr).Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	//	AddFunc:    func(obj interface{}) { c.AddToQueue(*gvr, obj) },
+	//	UpdateFunc: func(_, obj interface{}) { c.AddToQueue(*gvr, obj) },
+	//	DeleteFunc: func(obj interface{}) { c.AddToQueue(*gvr, obj) },
+	//})
+
 	return c
 }
 
 type Controller struct {
 	queue           workqueue.RateLimitingInterface
 	client          clusterv1alpha1.ClusterV1alpha1Interface
+	dynamicClient   dynamic.Interface
 	indexer         cache.Indexer
 	crdClient       apiextensionsv1client.ApiextensionsV1Interface
 	syncerImage     string
@@ -83,6 +102,15 @@ type Controller struct {
 	resourcesToSync []string
 	syncerMode      SyncerMode
 	syncers         map[string]*syncer.Controller
+}
+
+type holder struct {
+	gvr schema.GroupVersionResource
+	obj interface{}
+}
+
+func (c *Controller) AddToQueue(gvr schema.GroupVersionResource, obj interface{}) {
+	c.queue.AddRateLimited(holder{gvr: gvr, obj: obj})
 }
 
 func (c *Controller) enqueue(obj interface{}) {
@@ -161,6 +189,12 @@ func (c *Controller) process(key string) error {
 	current := obj.(*v1alpha1.Cluster)
 	previous := current.DeepCopy()
 
+	budget, err := strconv.Atoi(current.GetAnnotations()[budgetKey])
+	if err != nil {
+		return err
+	}
+
+	klog.Infof("Budget for %s is %d", current.Name, budget)
 	ctx := context.TODO()
 
 	if err := c.reconcileSyncer(ctx, current); err != nil {

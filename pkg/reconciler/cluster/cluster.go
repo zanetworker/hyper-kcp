@@ -3,6 +3,15 @@ package cluster
 import (
 	"context"
 	"fmt"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/json"
+
+	"k8s.io/apimachinery/pkg/types"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"log"
 	"sort"
 	"strconv"
@@ -27,6 +36,7 @@ const (
 	pollInterval     = time.Minute
 	numSyncerThreads = 2
 	budgetKey        = "kcp.dev/budget"
+	ownerKey         = "kcp.dev/owner"
 )
 
 func clusterOriginLabel(clusterID string) string {
@@ -66,7 +76,64 @@ func (c *Controller) reconcileHostedCluster(ctx context.Context) error {
 		}
 	}
 
-	klog.Infoln("Schedule to management cluster:", chooseCandidateCluster(budgetMap))
+	gvr := schema.GroupVersionResource{
+		Group:    "hypershift.openshift.io",
+		Version:  "v1alpha1",
+		Resource: "hostedclusters",
+	}
+
+	hostedClusters, err := c.dynamicClient.Resource(gvr).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+
+	var (
+		hcToPatch *unstructured.Unstructured
+		patch     = true
+	)
+	for _, hc := range hostedClusters.Items {
+		if len(hc.GetAnnotations()) > 0 {
+			if _, ok := hc.GetAnnotations()[ownerKey]; ok {
+				patch = false
+				continue
+			}
+			// Did not get scheduled yet
+			annotationsCopy := hc.GetAnnotations()
+			annotationsCopy[ownerKey] = chooseCandidateCluster(budgetMap)
+
+			hc.SetAnnotations(annotationsCopy)
+			hcToPatch = &hc
+
+			break
+		}
+
+		// Did not get scheduled yet
+		annotationsCopy := make(map[string]string)
+		annotationsCopy[ownerKey] = chooseCandidateCluster(budgetMap)
+
+		hc.SetAnnotations(annotationsCopy)
+		hcToPatch = &hc
+	}
+
+	data, err := json.Marshal(hcToPatch)
+	if err != nil {
+		return err
+	}
+
+	if patch {
+		klog.Infof("Schedule to Hosted Cluster %s management cluster: %s", hcToPatch.GetName(), chooseCandidateCluster(budgetMap))
+		if _, err := c.dynamicClient.Resource(gvr).Namespace(hcToPatch.GetNamespace()).Patch(ctx, hcToPatch.GetName(), types.MergePatchType, data, metav1.PatchOptions{
+			DryRun:       nil,
+			Force:        nil,
+			FieldManager: "scheduler",
+		}); err != nil {
+			klog.Errorf("Failed to schedule %v", err)
+			return err
+		}
+		klog.Infoln("Scheduled to management cluster:", chooseCandidateCluster(budgetMap))
+
+	}
+
 	return nil
 }
 func (c *Controller) reconcileSyncer(ctx context.Context, cluster *v1alpha1.Cluster) error {

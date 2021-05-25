@@ -122,6 +122,7 @@ func New(from, to *rest.Config, syncedResourceTypes []string, clusterID string) 
 	toSHIF.Core().V1().Namespaces().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.namespaceAdd,
 		UpdateFunc: c.namespaceUpdate,
+		DeleteFunc: c.namespaceDelete,
 	})
 
 	klog.Infof("Set up informer for namespaces")
@@ -143,6 +144,15 @@ func (c *Controller) namespaceAdd(obj interface{}) {
 
 func (c *Controller) namespaceUpdate(_, newObj interface{}) {
 	c.namespaceAdd(newObj)
+}
+
+func (c *Controller) namespaceDelete(obj interface{}) {
+	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
+	if err != nil {
+		klog.Errorf("Couldn't get key for object %+v: %v", obj, err)
+		return
+	}
+	c.namespacesQueue.Add(key)
 }
 
 func contains(ss []string, s string) bool {
@@ -201,6 +211,8 @@ func getAllGVRs(config *rest.Config, resourcesToSync ...string) ([]string, error
 	if notFoundResourceTypes.Len() != 0 {
 		return nil, fmt.Errorf("The following resource types were requested to be synced, but were not found in the KCP logical cluster: %v", notFoundResourceTypes.List())
 	}
+
+	klog.Infoln(gvrstrs)
 	return gvrstrs, nil
 }
 
@@ -285,8 +297,8 @@ func (c *Controller) processNextWorkItemNamespaces() bool {
 	// other workers.
 	defer c.queue.Done(i)
 
-	c.processNamespaces()
-	//c.handleErr(err, i)
+	err := c.processNamespaces()
+	c.handleErr(err, i)
 	return true
 }
 
