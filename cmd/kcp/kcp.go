@@ -213,7 +213,7 @@ func main() {
 							resourcesToSync,
 							syncerMode,
 						)
-						clusterController.Start(2)
+						clusterController.Start(1)
 						return nil
 					})
 				}

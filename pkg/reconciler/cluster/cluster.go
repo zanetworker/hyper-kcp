@@ -54,12 +54,14 @@ func chooseCandidateCluster(clusterBudgets map[int]string) string {
 	return clusterBudgets[keys[0]]
 
 }
-func (c *Controller) reconcileHostedCluster(ctx context.Context) error {
+func (c *Controller) reconcileHostedCluster(ctx context.Context, unstrob *unstructured.Unstructured) error {
+	klog.Infoln("Reconciling Hosted Cluster")
 	clusters, err := c.client.Clusters().List(ctx, v1.ListOptions{})
 	if err != nil {
 		return err
 	}
 
+	// create a map of clusters and Budgets
 	var budgetMap = make(map[int]string)
 	for _, cluster := range clusters.Items {
 		budget, ok := cluster.GetAnnotations()[budgetKey]
@@ -82,38 +84,77 @@ func (c *Controller) reconcileHostedCluster(ctx context.Context) error {
 		Resource: "hostedclusters",
 	}
 
-	hostedClusters, err := c.dynamicClient.Resource(gvr).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return err
-	}
-
+	//hostedClusters, err := c.dynamicClient.Resource(gvr).List(ctx, metav1.ListOptions{})
+	//if err != nil {
+	//	return err
+	//}
+	//
 	var (
-		hcToPatch *unstructured.Unstructured
-		patch     = true
+		hcToPatch       *unstructured.Unstructured
+		patch           = true
+		annotationsCopy map[string]string
 	)
-	for _, hc := range hostedClusters.Items {
-		if len(hc.GetAnnotations()) > 0 {
-			if _, ok := hc.GetAnnotations()[ownerKey]; ok {
-				patch = false
-				continue
-			}
-			// Did not get scheduled yet
-			annotationsCopy := hc.GetAnnotations()
-			annotationsCopy[ownerKey] = chooseCandidateCluster(budgetMap)
+	//
+	//if len(hostedClusters.Items) > 0 {
+	//	for _, hc := range hostedClusters.Items {
+	//		if len(hc.GetAnnotations()) > 0 {
+	//			if _, ok := hc.GetAnnotations()[ownerKey]; ok {
+	//				patch = false
+	//				continue
+	//			}
+	//			// Did not get scheduled yet
+	//			annotationsCopy := hc.GetAnnotations()
+	//			annotationsCopy[ownerKey] = chooseCandidateCluster(budgetMap)
+	//
+	//			hc.SetAnnotations(annotationsCopy)
+	//			hcToPatch = &hc
+	//
+	//		} else {
+	//			// Did not get scheduled yet
+	//			annotationsCopy := make(map[string]string)
+	//			annotationsCopy[ownerKey] = chooseCandidateCluster(budgetMap)
+	//
+	//			hc.SetAnnotations(annotationsCopy)
+	//			hcToPatch = &hc
+	//		}
+	//	}
+	//
+	//	data, err := json.Marshal(hcToPatch)
+	//	if err != nil {
+	//		return err
+	//	}
+	//
+	//	if patch {
+	//		klog.Infof("Schedule to Hosted Cluster %s management cluster: %s", hcToPatch.GetName(), chooseCandidateCluster(budgetMap))
+	//		if _, err := c.dynamicClient.Resource(gvr).Namespace(hcToPatch.GetNamespace()).Patch(ctx, hcToPatch.GetName(), types.MergePatchType, data, metav1.PatchOptions{
+	//			DryRun:       nil,
+	//			Force:        nil,
+	//			FieldManager: "scheduler",
+	//		}); err != nil {
+	//			klog.Errorf("Failed to schedule %v", err)
+	//			return err
+	//		}
+	//		klog.Infoln("Scheduled to management cluster:", chooseCandidateCluster(budgetMap))
+	//
+	//	}
+	//}
 
-			hc.SetAnnotations(annotationsCopy)
-			hcToPatch = &hc
-
-			break
+	if len(unstrob.GetAnnotations()) > 0 {
+		if _, ok := unstrob.GetAnnotations()[ownerKey]; ok {
+			patch = false
 		}
-
 		// Did not get scheduled yet
-		annotationsCopy := make(map[string]string)
+		annotationsCopy = unstrob.GetAnnotations()
 		annotationsCopy[ownerKey] = chooseCandidateCluster(budgetMap)
 
-		hc.SetAnnotations(annotationsCopy)
-		hcToPatch = &hc
+	} else {
+		// Did not get scheduled yet
+		annotationsCopy = make(map[string]string)
+		annotationsCopy[ownerKey] = chooseCandidateCluster(budgetMap)
 	}
+
+	unstrob.SetAnnotations(annotationsCopy)
+	hcToPatch = unstrob
 
 	data, err := json.Marshal(hcToPatch)
 	if err != nil {
@@ -133,7 +174,6 @@ func (c *Controller) reconcileHostedCluster(ctx context.Context) error {
 		klog.Infoln("Scheduled to management cluster:", chooseCandidateCluster(budgetMap))
 
 	}
-
 	return nil
 }
 func (c *Controller) reconcileSyncer(ctx context.Context, cluster *v1alpha1.Cluster) error {

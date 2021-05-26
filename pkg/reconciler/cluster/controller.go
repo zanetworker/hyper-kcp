@@ -2,10 +2,15 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"strconv"
 	"time"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"k8s.io/client-go/dynamic/dynamicinformer"
 
 	"k8s.io/client-go/dynamic"
 
@@ -48,14 +53,17 @@ const (
 func NewController(cfg *rest.Config, syncerImage string, kubeconfig clientcmdapi.Config, resourcesToSync []string, syncerMode SyncerMode) *Controller {
 
 	var (
-		client = clusterv1alpha1.NewForConfigOrDie(cfg)
-		queue  = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+		client          = clusterv1alpha1.NewForConfigOrDie(cfg)
+		queue           = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+		hypershiftQueue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+
 		stopCh = make(chan struct{}) // TODO: hook this up to SIGTERM/SIGINT
 
 		dynamicClient = dynamic.NewForConfigOrDie(cfg)
 		crdClient     = apiextensionsv1client.NewForConfigOrDie(cfg)
 		c             = &Controller{
 			queue:           queue,
+			hyperShiftQueue: hypershiftQueue,
 			client:          client,
 			crdClient:       crdClient,
 			syncerImage:     syncerImage,
@@ -66,8 +74,8 @@ func NewController(cfg *rest.Config, syncerImage string, kubeconfig clientcmdapi
 			syncers:         map[string]*syncer.Controller{},
 		}
 	)
-
 	c.dynamicClient = dynamicClient
+
 	sif := externalversions.NewSharedInformerFactoryWithOptions(clusterclient.NewForConfigOrDie(cfg), resyncPeriod)
 	sif.Cluster().V1alpha1().Clusters().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj interface{}) { c.enqueue(obj) },
@@ -78,22 +86,31 @@ func NewController(cfg *rest.Config, syncerImage string, kubeconfig clientcmdapi
 	sif.WaitForCacheSync(stopCh)
 	sif.Start(stopCh)
 
-	//gvrstr := "hostedclusters.v1alpha1.hypershift.openshift.io"
-	//gvr, _ := schema.ParseResourceArg(gvrstr)
+	gvrstr := "hostedclusters.v1alpha1.hypershift.openshift.io"
+	gvr, _ := schema.ParseResourceArg(gvrstr)
 
-	//cockPitDSIF.ForResource(*gvr).Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-	//	AddFunc:    func(obj interface{}) { c.AddToQueue(*gvr, obj) },
-	//	UpdateFunc: func(_, obj interface{}) { c.AddToQueue(*gvr, obj) },
-	//	DeleteFunc: func(obj interface{}) { c.AddToQueue(*gvr, obj) },
-	//})
+	cockpitSIF := dynamicinformer.NewFilteredDynamicSharedInformerFactory(c.dynamicClient, resyncPeriod, metav1.NamespaceAll, func(o *metav1.ListOptions) {
+		//o.LabelSelector = fmt.Sprintf("kcp.dev/cluster=%s", clusterID)
+	})
+	cockpitSIF.ForResource(*gvr).Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj interface{}) { c.AddToQueue(*gvr, obj) },
+		UpdateFunc: func(_, obj interface{}) { c.AddToQueue(*gvr, obj) },
+		DeleteFunc: func(obj interface{}) { c.AddToQueue(*gvr, obj) },
+	})
+
+	cockpitSIF.WaitForCacheSync(stopCh)
+	cockpitSIF.Start(stopCh)
+	c.cockpitSIF = cockpitSIF
 
 	return c
 }
 
 type Controller struct {
 	queue           workqueue.RateLimitingInterface
+	hyperShiftQueue workqueue.RateLimitingInterface
 	client          clusterv1alpha1.ClusterV1alpha1Interface
 	dynamicClient   dynamic.Interface
+	cockpitSIF      dynamicinformer.DynamicSharedInformerFactory
 	indexer         cache.Indexer
 	crdClient       apiextensionsv1client.ApiextensionsV1Interface
 	syncerImage     string
@@ -110,7 +127,7 @@ type holder struct {
 }
 
 func (c *Controller) AddToQueue(gvr schema.GroupVersionResource, obj interface{}) {
-	c.queue.AddRateLimited(holder{gvr: gvr, obj: obj})
+	c.hyperShiftQueue.AddRateLimited(holder{gvr: gvr, obj: obj})
 }
 
 func (c *Controller) enqueue(obj interface{}) {
@@ -126,6 +143,7 @@ func (c *Controller) Start(numThreads int) {
 	defer c.queue.ShutDown()
 	for i := 0; i < numThreads; i++ {
 		go wait.Until(c.startWorker, time.Second, c.stopCh)
+		go wait.Until(c.startWorkerHyperShift, time.Second, c.stopCh)
 	}
 	log.Println("Starting workers")
 	<-c.stopCh
@@ -135,6 +153,28 @@ func (c *Controller) Start(numThreads int) {
 func (c *Controller) startWorker() {
 	for c.processNextWorkItem() {
 	}
+}
+
+func (c *Controller) startWorkerHyperShift() {
+	for c.processNextWorkItemHyperShift() {
+	}
+}
+
+func (c *Controller) processNextWorkItemHyperShift() bool {
+	// Wait until there is a new item in the working queue
+	i, quit := c.hyperShiftQueue.Get()
+	if quit {
+		return false
+	}
+
+	h := i.(holder)
+
+	// No matter what, tell the queue we're done with this key, to unblock
+	// other workers.
+	defer c.queue.Done(i)
+	c.processHyperShift(h.gvr, h.obj)
+	//c.handleErrHyperShift(, i)
+	return true
 }
 
 func (c *Controller) processNextWorkItem() bool {
@@ -176,6 +216,44 @@ func (c *Controller) handleErr(err error, key string) {
 	klog.V(2).Infof("Dropping key %q after failed retries: %v", key, err)
 }
 
+func (c *Controller) handleErrHyperShift(quit bool, i interface{}) {
+	// Reconcile worked, nothing else to do for this workqueue item.
+	if quit {
+		c.queue.Forget(i)
+		return
+	}
+
+	// Re-enqueue up to 5 times.
+	num := c.queue.NumRequeues(i)
+	if num < 5 {
+		klog.Errorf("Error reconciling key %q, retrying... (#%d)", i, num)
+		c.queue.AddRateLimited(i)
+		return
+	}
+
+	// Give up and report error elsewhere.
+	c.queue.Forget(i)
+	klog.Errorf("Dropping key %q after failed retries")
+}
+
+func (c *Controller) processHyperShift(gvr schema.GroupVersionResource, obj interface{}) error {
+	klog.Infoln("processHyperShift", gvr)
+	obj, _, err := c.cockpitSIF.ForResource(gvr).Informer().GetIndexer().Get(obj)
+	if err != nil {
+		klog.Error(err)
+		return err
+	}
+
+	unstructuredObject, isUnstructured := obj.(*unstructured.Unstructured)
+	if !isUnstructured {
+		err := fmt.Errorf("object to synchronize is expected to be Unstructured, but is %T", obj)
+		klog.Error(err)
+		return err
+	}
+
+	return c.reconcileHostedCluster(context.TODO(), unstructuredObject)
+}
+
 func (c *Controller) process(key string) error {
 	obj, exists, err := c.indexer.GetByKey(key)
 	if err != nil {
@@ -209,7 +287,7 @@ func (c *Controller) process(key string) error {
 	}
 	log.Println("no update")
 
-	return c.reconcileHostedCluster(ctx)
+	return nil
 }
 
 func (c *Controller) deletedCluster(obj interface{}) {

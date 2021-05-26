@@ -36,7 +36,7 @@ import (
 
 const (
 	resyncPeriod = 10 * time.Hour
-	owner        = "owner"
+	owner        = "kcp.dev/owner"
 	budgetKey    = "kcp.dev/budget"
 )
 
@@ -98,15 +98,12 @@ func New(from, to *rest.Config, syncedResourceTypes []string, clusterID string) 
 	klog.Infoln("GVRs: ", gvrstrs)
 	for _, gvrstr := range gvrstrs {
 		gvr, _ := schema.ParseResourceArg(gvrstr)
-		klog.Infoln("gvr: ", gvr.String())
 
-		ret, err := fromDSIF.ForResource(*gvr).Lister().List(labels.Everything())
-		if err != nil {
-			klog.Infof("Failed to list all %q: %v", gvrstr, err)
-			continue
-		}
-
-		klog.Infoln("INFO: ", ret)
+		//ret, err := fromDSIF.ForResource(*gvr).Lister().List(labels.Everything())
+		//if err != nil {
+		//	klog.Infof("Failed to list all %q: %v", gvrstr, err)
+		//	continue
+		//}
 
 		fromDSIF.ForResource(*gvr).Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc:    func(obj interface{}) { c.AddToQueue(*gvr, obj) },
@@ -212,7 +209,6 @@ func getAllGVRs(config *rest.Config, resourcesToSync ...string) ([]string, error
 		return nil, fmt.Errorf("The following resource types were requested to be synced, but were not found in the KCP logical cluster: %v", notFoundResourceTypes.List())
 	}
 
-	klog.Infoln(gvrstrs)
 	return gvrstrs, nil
 }
 
@@ -286,7 +282,6 @@ func (c *Controller) processNextWorkItemGVRs() bool {
 }
 
 func (c *Controller) processNextWorkItemNamespaces() bool {
-	klog.Infoln("processNextWorkItemNamespaces")
 	// Wait until there is a new item in the working queue
 	i, quit := c.namespacesQueue.Get()
 	if quit {
@@ -329,7 +324,6 @@ func (c *Controller) processNamespaces() error {
 		return err
 	}
 
-	klog.Infoln("Namespace List:", len(namespaceList))
 	return c.upsertNamespaces(context.TODO(), len(namespaceList))
 }
 func (c *Controller) process(gvr schema.GroupVersionResource, obj interface{}) error {
@@ -339,12 +333,12 @@ func (c *Controller) process(gvr schema.GroupVersionResource, obj interface{}) e
 		if tombstone, isTombstone := obj.(cache.DeletedFinalStateUnknown); isTombstone {
 			meta, isMeta = tombstone.Obj.(metav1.Object)
 			if !isMeta {
-				err := fmt.Errorf("Tombstone contained object is expected to be a metav1.Object, but is %T: %#v", obj, obj)
+				err := fmt.Errorf("tombstone contained object is expected to be a metav1.Object, but is %T: %#v", obj, obj)
 				klog.Error(err)
 				return err
 			}
 		} else {
-			err := fmt.Errorf("Object to synchronize is expected to be a metav1.Object, but is %T", obj)
+			err := fmt.Errorf("object to synchronize is expected to be a metav1.Object, but is %T", obj)
 			klog.Error(err)
 			return err
 		}
@@ -367,7 +361,7 @@ func (c *Controller) process(gvr schema.GroupVersionResource, obj interface{}) e
 
 	unstructuredObject, isUnstructured := obj.(*unstructured.Unstructured)
 	if !isUnstructured {
-		err := fmt.Errorf("Object to synchronize is expected to be Unstructured, but is %T", obj)
+		err := fmt.Errorf("object to synchronize is expected to be Unstructured, but is %T", obj)
 		klog.Error(err)
 		return err
 	}
@@ -430,11 +424,15 @@ func (c *Controller) ensureClusterSchedulingBudget(ctx context.Context, gvr sche
 		return err
 	}
 
+	var annotations = unstrobj.GetAnnotations()
 	if unstrobj.GetName() == c.clusterID {
-		unstrobj.SetAnnotations(map[string]string{
-			budgetKey: strconv.Itoa(len(nsList.Items)),
-		})
+		if len(annotations) == 0 {
+			annotations = make(map[string]string)
+		}
 
+		annotations[budgetKey] = strconv.Itoa(len(nsList.Items))
+
+		unstrobj.SetAnnotations(annotations)
 		data, err := json.Marshal(unstrobj)
 		if err != nil {
 			return err
@@ -454,7 +452,7 @@ func (c *Controller) ensureClusterSchedulingBudget(ctx context.Context, gvr sche
 		}
 	}
 
-	klog.Infof("Budget Updated")
+	klog.Infof("Budget for cluster %s were updated!", c.clusterID)
 	return nil
 }
 
@@ -506,86 +504,80 @@ func (c *Controller) upsertNamespaces(ctx context.Context, budget int) error {
 	return c.ensureClusterSchedulingBudgetNamespaces(ctx, budget)
 }
 
-func (c *Controller) upsert(ctx context.Context, gvr schema.GroupVersionResource, namespace string, unstrob *unstructured.Unstructured) error {
-	return c.ensureClusterSchedulingBudget(ctx, gvr, unstrob)
-}
-
 var retryCounter = 0
 
-//func (c *Controller) upsert(ctx context.Context, gvr schema.GroupVersionResource, namespace string, unstrob *unstructured.Unstructured) error {
-//
-//	var (
-//		toClient           = c.getToClient(gvr, namespace)
-//		fromClient         = c.getFromClient(gvr, namespace)
-//		unstrobAnnotations = unstrob.GetAnnotations()
-//	)
-//
-//	// Attempt to create the object; if the object already exists, update it.
-//	unstrob.SetUID("")
-//	unstrob.SetResourceVersion("")
-//
-//	if len(unstrob.GetAnnotations()) == 0 {
-//		unstrobAnnotations = make(map[string]string)
-//	}
-//	ownerValue, hasOwnerAnnotation := unstrobAnnotations[owner]
-//
-//	// upsert only if we are the owner of the resource or if the resource does not have an owner yet
-//	klog.Infof("Has Owner Annotation: %t, Owner Value %s, Cluster ID: %s", hasOwnerAnnotation, ownerValue, c.clusterID)
-//
-//	if ownerValue == c.clusterID || !hasOwnerAnnotation {
-//		klog.Infof("Updating ownership on %s", gvr)
-//		// add owner
-//		unstrobAnnotations[owner] = c.clusterID
-//		unstrob.SetAnnotations(unstrobAnnotations)
-//
-//		data, err := json.Marshal(unstrob)
-//		if err != nil {
-//			return err
-//		}
-//
-//		if _, err := fromClient.Patch(ctx, unstrob.GetName(), types.MergePatchType, data, metav1.PatchOptions{
-//			FieldManager: fmt.Sprintf("syncer-%s", c.clusterID),
-//		}); err != nil {
-//			klog.Errorf("Updating resource %s/%s: %v", namespace, unstrob.GetName(), err)
-//			return err
-//		}
-//
-//		klog.Infof("Ownership updated on %s:%s", gvr, unstrob.GetName())
-//		if c.ensureClusterSchedulingBudget(ctx, 8) == budgetExceededError {
-//			// Just return a warning now
-//			klog.Warning(budgetExceededError.Error())
-//			return nil
-//		}
-//		if _, err := toClient.Create(ctx, unstrob, metav1.CreateOptions{}); err != nil {
-//			if !k8serrors.IsAlreadyExists(err) {
-//				klog.Error("Creating resource %s/%s: %v", namespace, unstrob.GetName(), err)
-//				return err
-//			}
-//
-//			existing, err := toClient.Get(ctx, unstrob.GetName(), metav1.GetOptions{})
-//			if err != nil {
-//				klog.Errorf("Getting resource %s/%s: %v", namespace, unstrob.GetName(), err)
-//				return err
-//			}
-//			klog.Infof("Object %s/%s already exists: update it", gvr.Resource, unstrob.GetName())
-//
-//			unstrob.SetResourceVersion(existing.GetResourceVersion())
-//			if _, err := toClient.Update(ctx, unstrob, metav1.UpdateOptions{}); err != nil {
-//				klog.Errorf("Updating resource %s/%s: %v", namespace, unstrob.GetName(), err)
-//				return err
-//			}
-//		} else {
-//			klog.Infof("Created object %s/%s", gvr.Resource, unstrob.GetName())
-//		}
-//
-//	} else {
-//		// Remove from queue to avoid actuating upon it again.
-//		c.queue.Forget(holder{
-//			gvr: gvr,
-//			obj: unstrob,
-//		})
-//		klog.Infoln("I don't own this resource, removing from queue!")
-//	}
-//
-//	return nil
-//}
+func (c *Controller) upsert(ctx context.Context, gvr schema.GroupVersionResource, namespace string, unstrob *unstructured.Unstructured) error {
+
+	var (
+		toClient = c.getToClient(gvr, namespace)
+		//fromClient         = c.getFromClient(gvr, namespace)
+		unstrobAnnotations = unstrob.GetAnnotations()
+	)
+
+	// Attempt to create the object; if the object already exists, update it.
+	unstrob.SetUID("")
+	unstrob.SetResourceVersion("")
+
+	if len(unstrob.GetAnnotations()) == 0 {
+		unstrobAnnotations = make(map[string]string)
+	}
+
+	ownerValue, hasOwnerAnnotation := unstrobAnnotations[owner]
+
+	// upsert only if we are the owner of the resource or if the resource does not have an owner yet
+
+	if !strings.Contains(gvr.String(), "cluster.example.dev/v1alpha1") {
+		klog.Infof("Has Owner Annotation: %t, Owner Value %s, Cluster ID: %s", hasOwnerAnnotation, ownerValue, c.clusterID)
+		if hasOwnerAnnotation && ownerValue == c.clusterID {
+			//// add owner
+			//unstrobAnnotations[owner] = c.clusterID
+			//unstrob.SetAnnotations(unstrobAnnotations)
+			//
+			//data, err := json.Marshal(unstrob)
+			//if err != nil {
+			//	return err
+			//}
+			//
+			//if _, err := fromClient.Patch(ctx, unstrob.GetName(), types.MergePatchType, data, metav1.PatchOptions{
+			//	FieldManager: fmt.Sprintf("syncer-%s", c.clusterID),
+			//}); err != nil {
+			//	klog.Errorf("Updating resource %s/%s: %v", namespace, unstrob.GetName(), err)
+			//	return err
+			//}
+
+			klog.Infof("Looks like I am this cluster's guardian, provisioning in a sec!")
+			if _, err := toClient.Create(ctx, unstrob, metav1.CreateOptions{}); err != nil {
+				if !k8serrors.IsAlreadyExists(err) {
+					klog.Error("Creating resource %s/%s: %v", namespace, unstrob.GetName(), err)
+					return err
+				}
+
+				existing, err := toClient.Get(ctx, unstrob.GetName(), metav1.GetOptions{})
+				if err != nil {
+					klog.Errorf("Getting resource %s/%s: %v", namespace, unstrob.GetName(), err)
+					return err
+				}
+				klog.Infof("Object %s/%s already exists: update it", gvr.Resource, unstrob.GetName())
+
+				unstrob.SetResourceVersion(existing.GetResourceVersion())
+				if _, err := toClient.Update(ctx, unstrob, metav1.UpdateOptions{}); err != nil {
+					klog.Errorf("Updating resource %s/%s: %v", namespace, unstrob.GetName(), err)
+					return err
+				}
+			} else {
+				klog.Infof("Created object %s/%s", gvr.Resource, unstrob.GetName())
+			}
+
+		} else {
+			// Remove from queue to avoid actuating upon it again.
+			c.queue.Forget(holder{
+				gvr: gvr,
+				obj: unstrob,
+			})
+		}
+
+	}
+
+	// Make sure to update the budget on cluster for correct future scheduling
+	return c.ensureClusterSchedulingBudget(ctx, gvr, unstrob)
+}
