@@ -1,0 +1,29 @@
+
+apiVersion: hypershift.openshift.io/v1alpha1
+kind: HostedCluster
+metadata:
+  name: example-two
+  namespace: hypershift
+spec:
+  sshKey: 
+    name: "test"
+  signingKey:
+    name: "test"
+  services:
+  - service: "APIServer"
+    servicePublishingStrategy: 
+      type: "NodePort"
+      nodePort: 
+        address: "test"
+        port: 1234
+  issuerURL: "test"
+  pullSecret:
+    name: pull-secret
+  release:
+    image: registry.svc.ci.openshift.org/ocp/release@sha256:579cd61047067d8d642dc0bf8b367ab309df96d096c8bc468a0a6807aa5b991e
+  platform: 
+    type: "None"
+  networking:
+    podCIDR: "test"
+    serviceCIDR: "test"
+    machineCIDR: "test"
