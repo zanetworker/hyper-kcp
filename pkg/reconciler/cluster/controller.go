@@ -189,6 +189,7 @@ func (c *Controller) processNextWorkItem() bool {
 	// other workers.
 	defer c.queue.Done(key)
 
+	log.Println(key)
 	err := c.process(key)
 	c.handleErr(err, key)
 	return true
@@ -264,15 +265,23 @@ func (c *Controller) process(key string) error {
 		log.Printf("Object with key %q was deleted", key)
 		return nil
 	}
-	current := obj.(*v1alpha1.Cluster)
-	previous := current.DeepCopy()
 
-	budget, err := strconv.Atoi(current.GetAnnotations()[budgetKey])
-	if err != nil {
-		return err
+	var (
+		current  = obj.(*v1alpha1.Cluster)
+		previous = current.DeepCopy()
+
+		budgetStr, ok = current.GetAnnotations()[budgetKey]
+		budget        int
+	)
+
+	if ok {
+		budget, err = strconv.Atoi(budgetStr)
+		if err != nil {
+			return err
+		}
+		klog.Infof("Budget for %s is %d", current.Name, budget)
 	}
 
-	klog.Infof("Budget for %s is %d", current.Name, budget)
 	ctx := context.TODO()
 
 	if err := c.reconcileSyncer(ctx, current); err != nil {

@@ -1,0 +1,42 @@
+apiVersion: hypershift.openshift.io/v1alpha1
+kind: HostedCluster
+metadata:
+  namespace: hypershift
+  name: kind-2
+spec:
+  infraID: kind-2
+  release:
+    image: quay.io/openshift-release-dev/ocp-release:4.8.0-fc.0-x86_64
+  platform:
+    type: None
+  initialComputeReplicas: 0
+  issuerURL: "https://oauth.kind-2.hypershift.example.com"
+  pullSecret:
+    name: pull-secret
+  signingKey:
+    name: signing-key
+  networking:
+    serviceCIDR: "172.31.0.0/16"
+    podCIDR:     "10.132.0.0/14"
+    machineCIDR: "10.0.0.0/16"
+  services:
+  - service: APIServer
+    servicePublishingStrategy:
+      type: NodePort
+      nodePort:
+        address: 0.0.0.0
+        port: 0
+  - service: VPN
+    servicePublishingStrategy:
+      type: NodePort
+      nodePort:
+        address: 0.0.0.0
+        port: 0
+  - service: OAuthServer
+    servicePublishingStrategy:
+      type: NodePort
+      nodePort:
+        address: 0.0.0.0
+        port: 0
+  dns:
+    baseDomain: kind-2.hypershift.example.com
